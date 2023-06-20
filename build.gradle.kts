@@ -51,6 +51,7 @@ extra.apply {
 
     set("clickHouseDriverVersion", "0.3.2-patch10")
     set("kafkaVersion", "2.6.0")
+    set("kafkaConnectTransformVersion", "3.5.0")
     set("avroVersion", "1.9.2")
 
     // Testing dependencies
@@ -70,6 +71,9 @@ val clickhouseDependencies: Configuration by configurations.creating
 
 dependencies {
     implementation("org.apache.kafka:connect-api:${project.extra["kafkaVersion"]}")
+    implementation("org.apache.kafka:connect-transforms:${project.extra["kafkaConnectTransformVersion"]}")
+
+
     implementation("com.clickhouse:clickhouse-client:${project.extra["clickHouseDriverVersion"]}")
     implementation("com.clickhouse:clickhouse-http-client:${project.extra["clickHouseDriverVersion"]}")
     implementation("io.lettuce:lettuce-core:6.2.0.RELEASE")
