@@ -46,6 +46,6 @@ public class ReplaceTopicName<R extends ConnectRecord<R>> implements Transformat
         final SimpleConfig config = new SimpleConfig(CONFIG_DEF, props);
         this.topicName = config.getString(ConfigName.TOPIC_FIELD);
 
-        LOGGER.info("Configuring TransformTopicName, topicName: {}", topicName);
+        LOGGER.info("Configuring ReplaceTopicName, topicName: {}", topicName);
     }
 }
