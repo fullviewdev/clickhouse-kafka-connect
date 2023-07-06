@@ -1,0 +1,52 @@
+name: Increment Version
+
+on:
+  workflow_dispatch:
+    inputs:
+        version:
+          type: choice
+          description: 'Version - patch, minor, or major'     
+          required: true
+          options: 
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v3
+      with:
+          fetch-depth: 0 # this is required to see all branches
+    - name: Configure Git
+      run: |
+        git config --global user.email "actions@github.com"
+        git config --global user.name "GitHub Action"
+    - name: Setup Node.js environment
+      uses: actions/setup-node@v3
+      with:
+        node-version: '16'
+    - name: Install dependencies
+      run: |
+        npm install semver
+        npm install fs
+    - name: Increment version
+      run: |
+        echo "Incrementing version..."
+        VERSION=$(cat VERSION)
+        NEW_VERSION=$(node -p "require('semver').inc('$VERSION', '${{ github.event.inputs.version }}')")
+        echo "v$NEW_VERSION" > VERSION
+        echo "NEW_VERSION=$NEW_VERSION" >> "$GITHUB_ENV"
+        echo "New version is $NEW_VERSION"
+    - name: Commit and push
+      run: |
+        git checkout -b update-version-${{ env.NEW_VERSION }}
+        git add VERSION
+        git commit -m "Increment version to ${{ env.NEW_VERSION }}"
+        git push -u origin
+        gh pr create --title "Automatic version increment ${{ env.NEW_VERSION }}" --body "This is an automated PR to increment the version."

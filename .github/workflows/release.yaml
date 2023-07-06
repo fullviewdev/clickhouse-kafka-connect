@@ -1,17 +1,18 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
+  
+permissions:
+  contents: write
 
 jobs:
   build_release:
     name: build_release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
       - name: Set env
         run: echo "RELEASE_VERSION=$(cat VERSION)" >> $GITHUB_ENV
       - name: Test
@@ -48,3 +49,9 @@ jobs:
           asset_path: ./build/confluent/clickhouse-kafka-connect-${{ env.RELEASE_VERSION }}.zip
           asset_name: clickhouse-kafka-connect-${{ env.RELEASE_VERSION }}.zip
           asset_content_type: application/zip
+      - name: Tag latest commit as release
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag ${{ env.RELEASE_VERSION }}
+          git push origin ${{ env.RELEASE_VERSION }}
