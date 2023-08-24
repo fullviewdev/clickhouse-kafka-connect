@@ -38,30 +38,20 @@ public class FVDropReplayData<R extends ConnectRecord<R>> implements Transformat
     public R apply(R record) {
 
         try {
-
             final Struct value = requireStruct(record.value(), PURPOSE);
             final Schema valueSchema = record.valueSchema();
-            final Struct updatedValue = new Struct(valueSchema);
 
-            // copy all the fields
-            boolean needsRemoval = false;
-            for (Field field : value.schema().fields()) {
-                Object fieldValue = value.get(field);
-
-                if (fieldValue != null && Objects.equals(field.name(), "is_replay_event") && fieldValue instanceof Boolean) {
-                    needsRemoval = true;
+            Field is_replay_event_field = value.schema().field("is_replay_event");
+            if (is_replay_event_field != null) {
+                Object is_replay_event_value = value.get(is_replay_event_field);
+                if (is_replay_event_value instanceof Boolean && Boolean.FALSE.equals(is_replay_event_value)) {
+                    value.put("payload", "");
                 }
-                updatedValue.put(field.name(), fieldValue);
-
             }
 
-            // if this record contains replay-data, we make it empty
-            if (needsRemoval) {
-                updatedValue.put("payload", "");
-            }
-            return record.newRecord(topicName, record.kafkaPartition(), record.keySchema(), record.key(), valueSchema, updatedValue, record.timestamp());
+            return record.newRecord(topicName, record.kafkaPartition(), record.keySchema(), record.key(), valueSchema, value, record.timestamp());
         } catch (Exception e) {
-            LOGGER.error("Error handling binary payload", e);
+            LOGGER.error("Error removing binary payload", e);
             throw e;
         }
     }
