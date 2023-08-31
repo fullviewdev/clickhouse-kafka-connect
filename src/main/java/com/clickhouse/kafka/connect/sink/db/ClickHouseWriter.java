@@ -2,7 +2,10 @@ package com.clickhouse.kafka.connect.sink.db;
 
 import com.clickhouse.client.*;
 import com.clickhouse.client.config.ClickHouseClientOption;
-import com.clickhouse.client.data.BinaryStreamUtils;
+import com.clickhouse.data.ClickHouseDataStreamFactory;
+import com.clickhouse.data.ClickHouseFormat;
+import com.clickhouse.data.ClickHousePipedOutputStream;
+import com.clickhouse.data.format.BinaryStreamUtils;
 import com.clickhouse.kafka.connect.sink.ClickHouseSinkConfig;
 import com.clickhouse.kafka.connect.sink.data.Data;
 import com.clickhouse.kafka.connect.sink.data.Record;
@@ -15,6 +18,7 @@ import com.clickhouse.kafka.connect.util.Mask;
 import com.clickhouse.kafka.connect.util.Utils;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
+import java.util.concurrent.TimeUnit;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
@@ -24,6 +28,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,23 +54,14 @@ public class ClickHouseWriter implements DBWriter{
 
     @Override
     public boolean start(ClickHouseSinkConfig csc) {
+        LOGGER.trace("Starting ClickHouseWriter");
         this.csc = csc;
-        String hostname = csc.getHostname();
-        int port = csc.getPort();
-        String database = csc.getDatabase();
-        String username = csc.getUsername();
-        String password = csc.getPassword();
-        boolean sslEnabled = csc.isSslEnabled();
-        int timeout = csc.getTimeout();
-
-        LOGGER.info(String.format("hostname: [%s] port [%d] database [%s] username [%s] password [%s] sslEnabled [%s] timeout [%d]", hostname, port, database, username, Mask.passwordMask(password), sslEnabled, timeout));
-
-        chc = new ClickHouseHelperClient.ClickHouseClientBuilder(hostname, port)
-                .setDatabase(database)
-                .setUsername(username)
-                .setPassword(password)
-                .sslEnable(sslEnabled)
-                .setTimeout(timeout)
+        chc = new ClickHouseHelperClient.ClickHouseClientBuilder(csc.getHostname(), csc.getPort())
+                .setDatabase(csc.getDatabase())
+                .setUsername(csc.getUsername())
+                .setPassword(csc.getPassword())
+                .sslEnable(csc.isSslEnabled())
+                .setTimeout(csc.getTimeout())
                 .setRetry(csc.getRetry())
                 .build();
 
@@ -74,7 +70,7 @@ public class ClickHouseWriter implements DBWriter{
             return false;
         }
 
-        LOGGER.info("Ping is successful.");
+        LOGGER.debug("Ping was successful.");
 
         List<Table> tableList = chc.extractTablesMapping();
         if (tableList.isEmpty()) {
@@ -82,7 +78,7 @@ public class ClickHouseWriter implements DBWriter{
             return false;
         }
 
-        for (Table table: tableList) {
+        for (Table table: tableList) {//TODO: Should we pull ALL tables in memory?
             this.mapping.put(table.getName(), table);
         }
         return true;
@@ -90,7 +86,7 @@ public class ClickHouseWriter implements DBWriter{
 
     @Override
     public void stop() {
-
+        LOGGER.debug("Stopping ClickHouseWriter");
     }
 
     public void setBinary(boolean binary) {
@@ -100,8 +96,7 @@ public class ClickHouseWriter implements DBWriter{
     // TODO: we need to refactor that
     private String convertHelper(Object v) {
         if (v instanceof List) {
-            String value = ((List<?>) v).stream().map( vv -> vv.toString()).collect(Collectors.joining(",","[","]"));
-            return value;
+            return ((List<?>) v).stream().map(vv -> vv.toString()).collect(Collectors.joining(",","[","]"));
 
         } else {
             return v.toString();
@@ -133,6 +128,10 @@ public class ClickHouseWriter implements DBWriter{
             Record first = records.get(0);
             String topic = first.getTopic();
             Table table = this.mapping.get(Utils.escapeTopicName(topic));
+            LOGGER.debug("Actual Min Offset: {} Max Offset: {} Partition: {}",
+                    first.getRecordOffsetContainer().getOffset(),
+                    records.get(records.size() - 1).getRecordOffsetContainer().getOffset(),
+                    first.getRecordOffsetContainer().getPartition());
 
             switch (first.getSchemaType()) {
                 case SCHEMA:
@@ -163,38 +162,26 @@ public class ClickHouseWriter implements DBWriter{
                 Data obj = record.getJsonMap().get(colName);
                 if (obj == null) {
                     validSchema = false;
-                    LOGGER.error(String.format("Table column name [%s] is not found in data record.", colName));
+                    LOGGER.error(String.format("Table column name [%s] was not found.", colName));
                 }
                 if (!onlyFieldsName) {
                     String colTypeName = type.name();
                     String dataTypeName = obj.getFieldType().getName().toUpperCase();
                     // TODO: make extra validation for Map/Array type
+                    LOGGER.debug(String.format("Column type name [%s] and data type name [%s]", colTypeName, dataTypeName));
                     switch (colTypeName) {
                         case "Date":
                         case "Date32":
-                            if ( dataTypeName.equals(Type.INT32) || dataTypeName.equals(Type.STRING) ) {
-                                LOGGER.debug(String.format("Will try to convert from %s to %s", colTypeName, dataTypeName));
-                            }
-                            break;
                         case "DateTime":
                         case "DateTime64":
-                            if ( dataTypeName.equals(Type.INT64) || dataTypeName.equals(Type.STRING) ) {
-                                LOGGER.debug(String.format("Will try to convert from %s to %s", colTypeName, dataTypeName));
-                            }
-                            break;
                         case "UUID":
-                            if ( dataTypeName.equals(Type.UUID) || dataTypeName.equals(Type.STRING) ) {
-                                LOGGER.debug(String.format("Will try to convert from %s to %s", colTypeName, dataTypeName));
-                            }
-                            break;
+                            break;//I notice we just break here, rather than actually validate the type
                         default:
                             if (!colTypeName.equals(dataTypeName)) {
                                 validSchema = false;
                                 LOGGER.error(String.format("Table column name [%s] type [%s] is not matching data column type [%s]", col.getName(), colTypeName, dataTypeName));
                             }
-
                     }
-
                 }
             }
         }
@@ -211,40 +198,67 @@ public class ClickHouseWriter implements DBWriter{
         switch (type) {
             case Date:
                 if (value.getFieldType().equals(Schema.Type.INT32)) {
-                    BinaryStreamUtils.writeUnsignedInt16(stream, ((Integer) value.getObject()).intValue());
+                    if (value.getObject().getClass().getName().endsWith(".Date")) {
+                        Date date = (Date)value.getObject();
+                        int timeInDays = (int) TimeUnit.MILLISECONDS.toDays(date.getTime());
+                        BinaryStreamUtils.writeUnsignedInt16(stream, timeInDays);
+                    } else {
+                        BinaryStreamUtils.writeUnsignedInt16(stream, (Integer) value.getObject());
+                    }
                 } else {
                     unsupported = true;
                 }
                 break;
             case Date32:
                 if (value.getFieldType().equals(Schema.Type.INT32)) {
-                    BinaryStreamUtils.writeInt32(stream, ((Integer) value.getObject()).intValue());
+                    if (value.getObject().getClass().getName().endsWith(".Date")) {
+                        Date date = (Date)value.getObject();
+                        int timeInDays = (int) TimeUnit.MILLISECONDS.toDays(date.getTime());
+                        BinaryStreamUtils.writeInt32(stream, timeInDays);
+                    } else {
+                        BinaryStreamUtils.writeInt32(stream, (Integer) value.getObject());
+                    }
                 } else {
                     unsupported = true;
                 }
                 break;
             case DateTime:
-                if (value.getFieldType().equals(Schema.Type.INT64)) {
-                    BinaryStreamUtils.writeUnsignedInt32(stream, ((Long) value.getObject()).longValue());
+                if (value.getFieldType().equals(Schema.Type.INT32) || value.getFieldType().equals(Schema.Type.INT64)) {
+                    if (value.getObject().getClass().getName().endsWith(".Date")) {
+                        Date date = (Date)value.getObject();
+                        long epochSecond = date.toInstant().getEpochSecond();
+                        BinaryStreamUtils.writeUnsignedInt32(stream, epochSecond);
+                    } else {
+                        BinaryStreamUtils.writeUnsignedInt32(stream, (Long) value.getObject());
+                    }
                 } else {
+                    
                     unsupported = true;
                 }
                 break;
             case DateTime64:
                 if (value.getFieldType().equals(Schema.Type.INT64)) {
-                    BinaryStreamUtils.writeInt64(stream, ((Long) value.getObject()).longValue());
+                    if (value.getObject().getClass().getName().endsWith(".Date")) {
+                        Date date = (Date)value.getObject();
+                        long time = date.getTime();
+                        BinaryStreamUtils.writeInt64(stream, time);
+                    } else {
+                        BinaryStreamUtils.writeInt64(stream, (Long) value.getObject());
+                    }
                 } else {
                     unsupported = true;
                 }
                 break;
         }
         if (unsupported) {
-            String msg = String.format("Not implemented conversion. from %s to %s", value.getFieldType(), type);
+            String msg = String.format("Not implemented conversion from %s to %s", value.getFieldType(), type);
             LOGGER.error(msg);
             throw new DataException(msg);
         }
     }
     private void doWritePrimitive(Type type, ClickHousePipedOutputStream stream, Object value) throws IOException {
+        LOGGER.trace("Writing primitive type: {}, value: {}", type, value);
+
         if (value == null) {
             BinaryStreamUtils.writeNull(stream);
             return;
@@ -257,10 +271,22 @@ public class ClickHouseWriter implements DBWriter{
                 BinaryStreamUtils.writeInt16(stream, (Short) value);
                 break;
             case INT32:
-                BinaryStreamUtils.writeInt32(stream, (Integer) value);
+                if (value.getClass().getName().endsWith(".Date")) {
+                    Date date = (Date)value;
+                    int time = (int)date.getTime();
+                    BinaryStreamUtils.writeInt32(stream, time);
+                } else {
+                    BinaryStreamUtils.writeInt32(stream, (Integer) value);
+                }
                 break;
             case INT64:
-                BinaryStreamUtils.writeInt64(stream, (Long) value);
+                if (value.getClass().getName().endsWith(".Date")) {
+                    Date date = (Date)value;
+                    long time = date.getTime();
+                    BinaryStreamUtils.writeInt64(stream, time);
+                } else {
+                    BinaryStreamUtils.writeInt64(stream, (Long) value);
+                }
                 break;
             case UINT8:
                 BinaryStreamUtils.writeUnsignedInt8(stream, (Byte) value);
@@ -293,18 +319,21 @@ public class ClickHouseWriter implements DBWriter{
     }
 
     private void doWriteCol(Record record, Column col, ClickHousePipedOutputStream stream) throws IOException {
+        LOGGER.trace("Writing column {} to stream", col.getName());
+        LOGGER.trace("Column type is {}", col.getType());
 
             String name = col.getName();
             Type colType = col.getType();
             boolean filedExists = record.getJsonMap().containsKey(name);
             if (filedExists) {
                 Data value = record.getJsonMap().get(name);
+                LOGGER.trace("Column value is {}", value);
                 // TODO: the mapping need to be more efficient
                 // If column is nullable && the object is also null add the not null marker
                 if (col.isNullable() && value.getObject() != null) {
                     BinaryStreamUtils.writeNonNull(stream);
                 }
-                if (col.isNullable() == false && value.getObject() == null) {
+                if (!col.isNullable() && value.getObject() == null) {
                     // this the situation when the col is not isNullable, but the data is null here we need to drop the records
                     throw new RuntimeException(("col.isNullable() is false and value is empty"));
                 }
@@ -334,14 +363,13 @@ public class ClickHouseWriter implements DBWriter{
                         Map<?,?> mapTmp = (Map<?,?>)value.getObject();
                         int mapSize = mapTmp.size();
                         BinaryStreamUtils.writeVarInt(stream, mapSize);
-                        mapTmp.entrySet().forEach( v-> {
+                        mapTmp.forEach((key, value1) -> {
                             try {
-                                doWritePrimitive(col.getMapKeyType(), stream, v.getKey());
-                                doWritePrimitive(col.getMapValueType(), stream, v.getValue());
+                                doWritePrimitive(col.getMapKeyType(), stream, key);
+                                doWritePrimitive(col.getMapValueType(), stream, value1);
                             } catch (IOException e) {
                                 throw new RuntimeException(e);
                             }
-
                         });
                         break;
                     case ARRAY:
@@ -362,8 +390,8 @@ public class ClickHouseWriter implements DBWriter{
                     // set null since there is no value
                     BinaryStreamUtils.writeNull(stream);
                 } else {
-                    // no filed and not nullable
-                    LOGGER.error(String.format("Record is missing field %s", name));
+                    // no filled and not nullable
+                    LOGGER.error("Column {} is not nullable and no value is provided", name);
                     throw new RuntimeException();
                 }
             }
@@ -378,11 +406,11 @@ public class ClickHouseWriter implements DBWriter{
 
         Record first = records.get(0);
         String topic = first.getTopic();
-        LOGGER.info(String.format("Number of records to insert %d to table name %s", batchSize, topic));
+        LOGGER.info("Inserting {} records into topic {}", batchSize, topic);
         Table table = this.mapping.get(Utils.escapeTopicName(topic));
         if (table == null) {
             //TODO to pick the correct exception here
-            throw new RuntimeException(String.format("Table %s does not exists", topic));
+            throw new RuntimeException(String.format("Table %s does not exist.", topic));
         }
 
         if ( !validateDataSchema(table, first, false) )
@@ -397,16 +425,19 @@ public class ClickHouseWriter implements DBWriter{
                     .table(table.getName())
                     .format(ClickHouseFormat.RowBinary)
                     // this is needed to get meaningful response summary
-                    .set("insert_quorum", 2)
-                    .set("send_progress_in_http_headers", 1);
+                    .set("insert_deduplication_token", first.getRecordOffsetContainer().getOffset() + first.getTopicAndPartition());
+
+            for (String clickhouseSetting: csc.getClickhouseSettings().keySet()) {//THIS ASSUMES YOU DON'T ADD insert_deduplication_token
+                request.set(clickhouseSetting, csc.getClickhouseSettings().get(clickhouseSetting));
+            }
 
             ClickHouseConfig config = request.getConfig();
             CompletableFuture<ClickHouseResponse> future;
 
             try (ClickHousePipedOutputStream stream = ClickHouseDataStreamFactory.getInstance()
-                    .createPipedOutputStream(config, null)) {
+                    .createPipedOutputStream(config)) {
                 // start the worker thread which transfer data from the input into ClickHouse
-                future = request.data(stream.getInputStream()).send();
+                future = request.data(stream.getInputStream()).execute();
                 // write bytes into the piped stream
                 for (Record record: records ) {
                     if (record.getSinkRecord().value() != null ) {
@@ -436,7 +467,6 @@ public class ClickHouseWriter implements DBWriter{
 
         long s3 = System.currentTimeMillis();
         LOGGER.info("batchSize {} data ms {} send {}", batchSize, s2 - s1, s3 - s2);
-
     }
 
 
@@ -456,8 +486,14 @@ public class ClickHouseWriter implements DBWriter{
         LOGGER.info(String.format("Number of records to insert %d to table name %s", batchSize, topic));
         Table table = this.mapping.get(Utils.escapeTopicName(topic));
         if (table == null) {
-            //TODO to pick the correct exception here
-            throw new RuntimeException(String.format("Table %s does not exists", topic));
+            if (csc.getSuppressTableExistenceException()) {
+                LOGGER.error("Table {} does not exist - see docs for more details about table names and topic names.", topic);
+                return;
+            } else {
+                //TODO to pick the correct exception here
+                LOGGER.error("Table {} does not exist - see docs for more details about table names and topic names.", topic);
+                throw new RuntimeException(String.format("Table %s does not exists", topic));
+            }
         }
 
         // We don't validate the schema for JSON inserts.  ClickHouse will ignore unknown fields based on the
@@ -469,9 +505,11 @@ public class ClickHouseWriter implements DBWriter{
                     .table(table.getName())
                     .format(ClickHouseFormat.JSONEachRow)
                     // this is needed to get meaningful response summary
-                    .set("insert_quorum", 2)
-                    .set("input_format_skip_unknown_fields", 1)
-                    .set("send_progress_in_http_headers", 1);
+                    .set("insert_deduplication_token", first.getRecordOffsetContainer().getOffset() + first.getTopicAndPartition());
+
+            for (String clickhouseSetting: csc.getClickhouseSettings().keySet()) {//THIS ASSUMES YOU DON'T ADD insert_deduplication_token
+                request.set(clickhouseSetting, csc.getClickhouseSettings().get(clickhouseSetting));
+            }
 
 
             ClickHouseConfig config = request.getConfig();
@@ -479,10 +517,9 @@ public class ClickHouseWriter implements DBWriter{
 
             CompletableFuture<ClickHouseResponse> future;
 
-            try (ClickHousePipedOutputStream stream = ClickHouseDataStreamFactory.getInstance()
-                    .createPipedOutputStream(config, null)) {
+            try (ClickHousePipedOutputStream stream = ClickHouseDataStreamFactory.getInstance().createPipedOutputStream(config)) {
                 // start the worker thread which transfer data from the input into ClickHouse
-                future = request.data(stream.getInputStream()).send();
+                future = request.data(stream.getInputStream()).execute();
                 // write bytes into the piped stream
                 for (Record record: records ) {
                     if (record.getSinkRecord().value() != null ) {
@@ -502,11 +539,11 @@ public class ClickHouseWriter implements DBWriter{
                         
                         java.lang.reflect.Type gsonType = new TypeToken<HashMap>() {}.getType();
                         String gsonString = gson.toJson(data, gsonType);
-                        LOGGER.debug(String.format("topic [%s] partition [%d] offset [%d] payload '%s'",
+                        LOGGER.trace("topic {} partition {} offset {} payload {}",
                                 record.getTopic(),
                                 record.getRecordOffsetContainer().getPartition(),
                                 record.getRecordOffsetContainer().getOffset(),
-                                gsonString));
+                                gsonString);
                         BinaryStreamUtils.writeBytes(stream, gsonString.getBytes(StandardCharsets.UTF_8));
                     } else {
                         LOGGER.warn(String.format("Getting empty record skip the insert topic[%s] offset[%d]", record.getTopic(), record.getSinkRecord().kafkaOffset()));
@@ -519,7 +556,7 @@ public class ClickHouseWriter implements DBWriter{
                 try (ClickHouseResponse response = future.get()) {
                     summary = response.getSummary();
                     long rows = summary.getWrittenRows();
-                    LOGGER.trace(String.format("insert num of rows %d", rows));
+                    LOGGER.debug("Number of rows inserted: {}", rows);
                 } catch (Exception e) {//This is mostly for auto-closing
                     LOGGER.trace("Exception", e);
                     throw e;
@@ -536,6 +573,7 @@ public class ClickHouseWriter implements DBWriter{
         LOGGER.info("batchSize {} data ms {} send {}", batchSize, s2 - s1, s3 - s2);
     }
 
+    /**
     public void doInsertSimple(List<Record> records) {
         // TODO: here we will need to make refactor (not to use query & string , but we can make this optimization later )
         long s1 = System.currentTimeMillis();
@@ -569,29 +607,31 @@ public class ClickHouseWriter implements DBWriter{
         LOGGER.debug(insertStr);
         LOGGER.debug("*****************");
         chc.query(insertStr, ClickHouseFormat.RowBinaryWithNamesAndTypes);
-        /*
-        try (ClickHouseClient client = ClickHouseClient.newInstance(ClickHouseProtocol.HTTP);
-             ClickHouseResponse response = client.connect(chc.getServer())  // or client.connect(endpoints)
-                     // you'll have to parse response manually if using a different format
-                     .option(ClickHouseClientOption.CONNECTION_TIMEOUT, csc.getTimeout())
-                     .option(ClickHouseClientOption.SOCKET_TIMEOUT, csc.getTimeout())
-                     .format(ClickHouseFormat.RowBinaryWithNamesAndTypes)
-                     .query(insertStr)
-                     .executeAndWait()) {
-            ClickHouseResponseSummary summary = response.getSummary();
-            long totalRows = summary.getTotalRowsToRead();
-            LOGGER.info("totalRows {}", totalRows);
 
-        } catch (ClickHouseException e) {
-            LOGGER.debug(insertStr);
-            LOGGER.error(String.format("INSERT ErrorCode %d ", e.getErrorCode()), e);
-            throw new RuntimeException(e);
-        }
+//        try (ClickHouseClient client = ClickHouseClient.newInstance(ClickHouseProtocol.HTTP);
+//             ClickHouseResponse response = client.connect(chc.getServer())  // or client.connect(endpoints)
+//                     // you'll have to parse response manually if using a different format
+//                     .option(ClickHouseClientOption.CONNECTION_TIMEOUT, csc.getTimeout())
+//                     .option(ClickHouseClientOption.SOCKET_TIMEOUT, csc.getTimeout())
+//                     .format(ClickHouseFormat.RowBinaryWithNamesAndTypes)
+//                     .query(insertStr)
+//                     .executeAndWait()) {
+//            ClickHouseResponseSummary summary = response.getSummary();
+//            long totalRows = summary.getTotalRowsToRead();
+//            LOGGER.info("totalRows {}", totalRows);
+//
+//        } catch (ClickHouseException e) {
+//            LOGGER.debug(insertStr);
+//            LOGGER.error(String.format("INSERT ErrorCode %d ", e.getErrorCode()), e);
+//            throw new RuntimeException(e);
+//        }
 
-         */
+
         long s3 = System.currentTimeMillis();
         LOGGER.info("batchSize {} data ms {} send {}", batchSize, s2 - s1, s3 - s2);
     }
+    **/
+
 
     @Override
     public long recordsInserted() {
